@@ -40,8 +40,7 @@ case "$COMMAND" in
     fi
     printf '%s\n' \
       'Verified on OMP 18.1.20; requires the AgentRegistry SDK export.' \
-      'Link this package with Herdr and keep it enabled:'
-    printf '  herdr plugin link "%s"\n' "$ROOT"
+      'Keep omp-subagents enabled in Herdr; marketplace installations are already registered.'
     printf '%s\n' 'Restart each already-running OMP session to load this new extension.' \
       'After the current task finishes, quit OMP, then use omp --resume <session-id>.' \
       'Linking or /reload-plugins does not load newly installed extension modules.'
