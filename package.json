@@ -1,0 +1,11 @@
+{
+  "name": "herdr-omp-subagents",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Herdr native sidebar metadata for live OMP subagent models",
+  "scripts": {
+    "test": "bun test",
+    "doctor": "sh scripts/plugin.sh doctor"
+  }
+}
