@@ -8,7 +8,7 @@ import {
   resolveRootStatus,
 } from "./src/collector.ts";
 import { formatAgents } from "./src/format.ts";
-import { createReporter, type Reporter } from "./src/reporter.ts";
+import { createReporter, type Reporter, type Rows } from "./src/reporter.ts";
 import { HEARTBEAT_MS, type ActiveAgent, type PaneBinding } from "./src/types.ts";
 
 /**
@@ -63,12 +63,13 @@ interface Publisher {
   onError: (error: Error) => void;
 }
 
+/** Versioned: a reload must not reuse a reporter built for an older token contract. */
 const CLAIM_HOST = globalThis as unknown as {
-  __herdrOmpSubagentPublishers__?: Map<string, Publisher>;
+  __herdrOmpSubagentPublishersV2__?: Map<string, Publisher>;
 };
 
 function publishers(): Map<string, Publisher> {
-  return (CLAIM_HOST.__herdrOmpSubagentPublishers__ ??= new Map());
+  return (CLAIM_HOST.__herdrOmpSubagentPublishersV2__ ??= new Map());
 }
 
 /** The pane this OMP process runs in, as exported by `herdr`. */
@@ -90,7 +91,7 @@ function isRegistry(value: unknown): value is AgentRegistryLike {
   );
 }
 
-/** Confirmed in OMP 18.1.20; capability detection avoids private imports. */
+/** Confirmed in OMP 18.1.20 and 18.4.1; capability detection avoids private imports. */
 function resolveRegistry(exports: unknown): AgentRegistryLike | null {
   const sdk = exports as { AgentRegistry?: { global?: () => unknown } } | null | undefined;
   const registryClass = sdk?.AgentRegistry;
@@ -123,8 +124,8 @@ class Bridge {
   #claimed = false;
   #enabled = false;
   #activationInFlight = false;
-  /** Newest formatted token value, kept current even while disabled. */
-  #desired: string | null = null;
+  /** Newest formatted sidebar rows, kept current even while disabled. */
+  #desired: Rows = [];
   #state = "not started";
   #activationError: string | null = null;
   #reportError: string | null = null;
@@ -172,7 +173,7 @@ class Bridge {
     await this.#tick(generation);
   }
 
-  /** Release the pane token (owner only) and stop observing. */
+  /** Release the pane rows (owner only) and stop observing. */
   async stop(): Promise<void> {
     await this.#teardown("stopped", true);
   }
@@ -188,7 +189,7 @@ class Bridge {
     ];
     if (this.#claimed) {
       lines.push(`herdr plugin: ${this.#enabled ? "enabled" : "disabled or unreachable"}`);
-      lines.push(`token: ${this.#desired === null ? "cleared" : this.#desired}`);
+      lines.push(`rows: ${this.#desired.length === 0 ? "cleared" : this.#desired.join(" / ")}`);
     }
     if (this.#activationError) lines.push(`activation check: ${this.#activationError}`);
     if (this.#reportError) lines.push(`last report error: ${this.#reportError}`);
@@ -266,7 +267,7 @@ class Bridge {
     this.#claimed = true;
     this.#state = "publishing";
     this.#reporter = publisher.reporter;
-    this.#reporter.set(null);
+    this.#reporter.set([]);
     // Agents may already be running (session switch mid-run, late attach), and
     // those never produced a change callback.
     this.#desired = formatAgents(observer.snapshot());
@@ -299,7 +300,7 @@ class Bridge {
       this.#activationError = null;
       this.#enabled = enabled;
       this.#state = enabled ? "publishing" : "idle: plugin disabled in Herdr";
-      reporter.set(enabled ? this.#desired : null);
+      reporter.set(enabled ? this.#desired : []);
       reporter.heartbeat();
     } catch (error) {
       if (generation !== this.#generation) return;
@@ -324,7 +325,7 @@ class Bridge {
     this.#observer = null;
     this.#registry = null;
     this.#binding = null;
-    this.#desired = null;
+    this.#desired = [];
     this.#enabled = false;
     this.#activationInFlight = false;
     this.#state = state;
@@ -337,7 +338,7 @@ class Bridge {
       // Keep the writer alive but idle. A new owner reuses its queue, so this
       // clear cannot arrive after that owner's newer value.
       publisher.token = {};
-      reporter.set(null);
+      reporter.set([]);
       await reporter.flush();
     }
   }

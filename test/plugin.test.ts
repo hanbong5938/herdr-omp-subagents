@@ -7,6 +7,7 @@ import { createServer, type Socket } from "node:net";
 import { observeAgents, type AgentRegistryLike, type RegistryAgentRef } from "../src/collector.ts";
 import { formatAgents, MAX_TOKEN_BYTES } from "../src/format.ts";
 import { createReporter } from "../src/reporter.ts";
+import { ROW_TOKENS } from "../src/types.ts";
 
 function agent(id: string, parentId?: string, file = `/sessions/root/${id}.jsonl`): RegistryAgentRef {
   return {
@@ -44,31 +45,36 @@ test("only live descendants of the current transcript survive restart, model cha
   expect(observer.snapshot().map(row => row.id)).toEqual(["nested"]);
   refs.set("nested", { ...refs.get("nested")!, status: "aborted", session: null });
   observer.refresh();
-  expect(formatAgents(observer.snapshot())).toBeNull();
+  expect(formatAgents(observer.snapshot())).toEqual([]);
   refs.set("child", { ...child, session: { isStreaming: true, sessionManager: child.session!.sessionManager } });
   observer.refresh();
-  expect(formatAgents(observer.snapshot())).toContain("scout:?");
+  expect(formatAgents(observer.snapshot())).toEqual(["scout:?"]);
   observer.dispose();
   expect(listeners.size).toBe(0);
 });
 
-test("labels retain unknown model identity, distinguish duplicates and bound hostile Unicode input", () => {
-  expect(formatAgents([{ id: "a", role: "task", modelId: "ACME.Experimental-v2" }])).toBe("[task:ACME.Experimental-v2]");
-  const rows = Array.from({ length: 20 }, (_, i) => ({
+test("rows retain unknown model identity, distinguish duplicates, fold overflow and bound hostile Unicode input", () => {
+  expect(formatAgents([{ id: "a", role: "task", modelId: "ACME.Experimental-v2" }])).toEqual(["task:ACME.Experimental-v2"]);
+  const four = Array.from({ length: 4 }, (_, i) => ({ id: String(i), role: "task", modelId: "claude-opus-5-5" }));
+  expect(formatAgents(four)).toEqual(["task#1:opus-5-5", "task#2:opus-5-5", "task#3:opus-5-5", "task#4:opus-5-5"]);
+  const agents = Array.from({ length: 20 }, (_, i) => ({
     id: String(i).padStart(2, "0"), role: "\x1b[31mscout\x1b[0m\n\u202e", modelId: "模型😀".repeat(20),
   }));
-  const value = formatAgents(rows)!;
-  expect(value).toContain("scout#1:");
-  expect(value).toMatch(/\+\d+\]$/);
-  expect(Buffer.byteLength(value)).toBeLessThanOrEqual(MAX_TOKEN_BYTES);
-  expect(value).not.toMatch(/[\p{Cc}\p{Cf}\p{Cs}]/u);
-  expect(formatAgents([...rows].reverse())).toBe(value);
+  const rows = formatAgents(agents);
+  expect(rows).toHaveLength(ROW_TOKENS.length);
+  expect(rows[0]).toStartWith("scout#1:");
+  expect(rows.at(-1)).toBe(`+${agents.length - ROW_TOKENS.length + 1}`);
+  for (const row of rows) {
+    expect(Buffer.byteLength(row)).toBeLessThanOrEqual(MAX_TOKEN_BYTES);
+    expect(row).not.toMatch(/[\p{Cc}\p{Cf}\p{Cs}]/u);
+  }
+  expect(formatAgents([...agents].reverse())).toEqual(rows);
 });
 
 test("a slow old write cannot overtake a new value or the final clear", async () => {
   const dir = mkdtempSync(join(tmpdir(), "herdr-publisher-"));
   const binary = join(dir, "herdr");
-  const sink = join(dir, "value.json");
+  const sink = join(dir, "tokens.json");
   const socketPath = join(dir, "barrier");
   const ready = Promise.withResolvers<Socket>();
   const server = createServer(socket => ready.resolve(socket));
@@ -78,40 +84,46 @@ test("a slow old write cannot overtake a new value or the final clear", async ()
 import { connect } from 'node:net';
 import { once } from 'node:events';
 const args = process.argv.slice(2);
-const token = args.indexOf('--token');
-const value = token < 0 ? null : args[token + 1].slice('subagents='.length);
-if (value === 'first') {
+const file = Bun.file(${JSON.stringify(sink)});
+const tokens = (await file.exists()) ? await file.json() : {};
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--token') { const [name, ...rest] = args[++i].split('='); tokens[name] = rest.join('='); }
+  if (args[i] === '--clear-token') delete tokens[args[++i]];
+}
+if (tokens.subagents_1 === 'first') {
   const socket = connect(${JSON.stringify(socketPath)});
   await once(socket, 'data');
   socket.end();
 }
-await Bun.write(${JSON.stringify(sink)}, JSON.stringify(value));
-if (value === 'applied-but-lost') process.exit(1);
+await Bun.write(file, JSON.stringify(tokens));
+if (tokens.subagents_1 === 'applied-but-lost') process.exit(1);
 console.log(JSON.stringify({result:{}}));
 `);
   chmodSync(binary, 0o700);
   const errors: Error[] = [];
   const reporter = createReporter({ paneId: "test:p1", socketPath: join(dir, "socket"), herdrBin: binary }, error => errors.push(error));
   try {
-    reporter.set("first");
+    const published = () => JSON.parse(readFileSync(sink, "utf8"));
+    reporter.set(["first", "second"]);
     const first = reporter.flush();
     const held = await ready.promise;
-    reporter.set(null);
-    reporter.set("latest; $(not-a-command)");
+    reporter.set([]);
+    reporter.set(["latest; $(not-a-command)"]);
     held.end("continue");
     await reporter.flush();
     await first;
-    expect(JSON.parse(readFileSync(sink, "utf8"))).toBe("latest; $(not-a-command)");
-    reporter.set(null);
+    // A shorter row set clears the slots the previous one filled.
+    expect(published()).toEqual({ subagents_1: "latest; $(not-a-command)" });
+    reporter.set([]);
     await reporter.flush();
-    reporter.set("applied-but-lost");
+    reporter.set(["applied-but-lost"]);
     await reporter.flush();
-    expect(JSON.parse(readFileSync(sink, "utf8"))).toBe("applied-but-lost");
-    reporter.set(null);
+    expect(published()).toEqual({ subagents_1: "applied-but-lost" });
+    reporter.set([]);
     await reporter.flush();
-    expect(JSON.parse(readFileSync(sink, "utf8"))).toBeNull();
+    expect(published()).toEqual({});
     await reporter.dispose();
-    expect(JSON.parse(readFileSync(sink, "utf8"))).toBeNull();
+    expect(published()).toEqual({});
     expect(errors).toHaveLength(1);
   } finally {
     await reporter.dispose();

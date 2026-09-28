@@ -17,10 +17,11 @@ HERDR=${HERDR_BIN_PATH:-herdr}
 
 sidebar_help() {
   printf '%s\n' \
-    'Required sidebar setup: add a dedicated ["$subagents"] row to' \
-    '  [ui.sidebar.agents] rows in ~/.config/herdr/config.toml' \
-    'Keep it separate from ["agent", "$ctx"] so narrow sidebars do not clip it.' \
-    'Preserve your existing rows and insert ["$subagents"] before ["$cache"].' \
+    'Required sidebar setup: add one row per slot to [ui.sidebar.agents] rows' \
+    '  in ~/.config/herdr/config.toml, before ["$cache"], keeping existing rows:' \
+    '  ["$subagents_1"], ["$subagents_2"], ["$subagents_3"], ["$subagents_4"],' \
+    'One agent per row; the fourth row becomes +N when more are active.' \
+    'Unused rows disappear. Optional style: [{ token = "$subagents_1", fg = "#56b6c2" }]' \
     'Then run: herdr server reload-config' \
     'Use /herdr-subagents inside OMP for live identities and activation status.'
 }
@@ -31,6 +32,11 @@ case "$COMMAND" in
     mkdir -p "$AGENT_DIR/extensions"
     if test -L "$TARGET" && test "$(readlink "$TARGET")" = "$SOURCE"; then
       printf 'Already installed: %s\n' "$TARGET"
+    elif test -L "$TARGET" && ! test -e "$TARGET"; then
+      # A plugin update or a moved checkout leaves the old link dangling.
+      printf 'Replacing broken link: %s -> %s\n' "$TARGET" "$(readlink "$TARGET")"
+      ln -sf "$SOURCE" "$TARGET"
+      printf 'Installed: %s -> %s\n' "$TARGET" "$SOURCE"
     elif test -e "$TARGET" || test -L "$TARGET"; then
       printf 'Refusing to replace an existing file: %s\n' "$TARGET" >&2
       exit 1
@@ -39,7 +45,7 @@ case "$COMMAND" in
       printf 'Installed: %s -> %s\n' "$TARGET" "$SOURCE"
     fi
     printf '%s\n' \
-      'Verified on OMP 18.1.20; requires the AgentRegistry SDK export.' \
+      'Verified on OMP 18.1.20 and 18.4.1; requires the AgentRegistry SDK export.' \
       'Keep omp-subagents enabled in Herdr; marketplace installations are already registered.'
     printf '%s\n' 'Restart each already-running OMP session to load this new extension.' \
       'After the current task finishes, quit OMP, then use omp --resume <session-id>.' \
@@ -47,7 +53,7 @@ case "$COMMAND" in
     sidebar_help
     ;;
   uninstall)
-    if test -L "$TARGET" && test "$(readlink "$TARGET")" = "$SOURCE"; then
+    if test -L "$TARGET" && { test "$(readlink "$TARGET")" = "$SOURCE" || ! test -e "$TARGET"; }; then
       rm "$TARGET"
       printf 'Removed bridge link: %s\n' "$TARGET"
     elif test -e "$TARGET" || test -L "$TARGET"; then
@@ -65,10 +71,20 @@ case "$COMMAND" in
       case "$HELP" in *"$FLAG"*) ;; *)
         printf 'Missing required Herdr metadata flag: %s\n' "$FLAG" >&2; exit 1 ;; esac
     done
-    if test -L "$TARGET" && test "$(readlink "$TARGET")" = "$SOURCE"; then
+    if test -L "$TARGET" && ! test -e "$TARGET"; then
+      printf 'Bridge link is broken: %s -> %s; run install to repair it.\n' "$TARGET" "$(readlink "$TARGET")" >&2
+      exit 1
+    elif test -L "$TARGET" && test "$(readlink "$TARGET")" = "$SOURCE"; then
       printf '%s\n' 'Bridge link: OK'
     else
       printf '%s\n' 'Bridge not registered here; run install or pass your profile agent directory.' >&2
+      exit 1
+    fi
+    # The bridge publishes only while Herdr lists this plugin as enabled.
+    if "$HERDR" plugin list --json | tr '{' '\n' | grep '"plugin_id":"omp-subagents"' | grep -q '"enabled":true'; then
+      printf '%s\n' 'Herdr plugin: enabled'
+    else
+      printf '%s\n' 'Herdr plugin omp-subagents is not installed or not enabled; install, link or enable it.' >&2
       exit 1
     fi
     printf 'Pane: %s\nSocket: %s\n' "${HERDR_PANE_ID:-not inside Herdr}" "${HERDR_SOCKET_PATH:-unset}"

@@ -1,20 +1,23 @@
 import { execFile } from "node:child_process";
 
-import { SOURCE, TOKEN, TTL_MS, type PaneBinding } from "./types.ts";
+import { ROW_TOKENS, SOURCE, TTL_MS, type PaneBinding } from "./types.ts";
 
 /** Coalescing window for registry churn; one CLI call per burst. */
 const DEBOUNCE_MS = 200;
 /** A wedged CLI must never stall the queue, so the child is killed past this. */
 const CLI_TIMEOUT_MS = 5_000;
 
+/** Sidebar row labels in order; empty clears every row. */
+export type Rows = readonly string[];
+
 export interface Reporter {
-  /** Requests a token value, or `null` to clear it. Debounced and coalesced. */
-  set(value: string | null): void;
+  /** Requests the row labels to show. Debounced and coalesced. */
+  set(rows: Rows): void;
   /** Refreshes the TTL and retries whatever the last write failed to apply. */
   heartbeat(): void;
   /** Publishes any pending value now and resolves once the queue is idle. */
   flush(): Promise<void>;
-  /** Clears the token and stops accepting updates. Idempotent. */
+  /** Clears every row and stops accepting updates. Idempotent. */
   dispose(): Promise<void>;
 }
 
@@ -43,15 +46,21 @@ function failureReason(raw: string): string | null {
   return detail.length > 0 ? detail.join(": ") : "herdr rejected the report";
 }
 
+function sameRows(a: Rows | undefined, b: Rows | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((row, i) => row === b[i]);
+}
+
 /**
- * Serial, coalescing publisher for the pane token. At most one `herdr` child is
+ * Serial, coalescing publisher for the pane rows. At most one `herdr` child is
  * alive at a time and every write reads the newest desired value, so a slow
  * write can never land on top of a newer state.
  */
 export function createReporter(binding: PaneBinding, onError: (error: Error) => void): Reporter {
-  let desired: string | null = null;
+  let desired: Rows = [];
   /** `undefined` while the server state is unknown, so the first write always runs. */
-  let published: string | null | undefined;
+  let published: Rows | undefined;
   /** Open debounce window; every `set` inside it coalesces into one write. */
   let debouncing = false;
   let inFlight: Promise<void> | null = null;
@@ -72,14 +81,16 @@ export function createReporter(binding: PaneBinding, onError: (error: Error) => 
     }
   }
 
-  function report(value: string | null): Promise<string | null> {
+  function report(rows: Rows): Promise<string | null> {
     const { promise, resolve } = Promise.withResolvers<string | null>();
     const args = ["pane", "report-metadata", binding.paneId, "--source", SOURCE];
-    if (value === null) {
-      args.push("--clear-token", TOKEN);
-    } else {
-      args.push("--token", `${TOKEN}=${value}`, "--ttl-ms", String(TTL_MS));
-    }
+    // Every slot is written in one call, so rows never shift between two states.
+    ROW_TOKENS.forEach((token, i) => {
+      const row = rows[i];
+      if (row === undefined) args.push("--clear-token", token);
+      else args.push("--token", `${token}=${row}`);
+    });
+    if (rows.length > 0) args.push("--ttl-ms", String(TTL_MS));
 
     // Never throws and never rejects: callers treat a string as the failure reason.
     try {
@@ -128,8 +139,10 @@ export function createReporter(binding: PaneBinding, onError: (error: Error) => 
     const forced = force;
     force = false;
     const value = desired;
-    // A forced pass still skips the no-op case of clearing an already-clear token.
-    const needed = forced ? value !== null || published !== null : value !== published && !failed;
+    // A forced pass still skips the no-op case of clearing already-clear rows.
+    const needed = forced
+      ? value.length > 0 || published === undefined || published.length > 0
+      : !sameRows(value, published) && !failed;
     if (!needed) return;
 
     inFlight = (async () => {
@@ -141,7 +154,7 @@ export function createReporter(binding: PaneBinding, onError: (error: Error) => 
       }
       // A transport failure may happen after the server applied the write.
       published = undefined;
-      failed = desired === value;
+      failed = sameRows(desired, value);
       notify(new Error(`herdr report-metadata failed: ${reason}`));
     })();
 
@@ -154,9 +167,9 @@ export function createReporter(binding: PaneBinding, onError: (error: Error) => 
   }
 
   return {
-    set(value: string | null): void {
-      if (closed || value === desired) return;
-      desired = value;
+    set(rows: Rows): void {
+      if (closed || sameRows(rows, desired)) return;
+      desired = rows;
       // A new value earns a fresh attempt even if the previous one failed.
       failed = false;
       if (debouncing) return;
@@ -189,13 +202,13 @@ export function createReporter(binding: PaneBinding, onError: (error: Error) => 
         // `closed` cancels the debounced write; wait out any live child so the
         // clear is the last thing the server sees.
         while (inFlight) await inFlight;
-        if (published === null) return;
-        const reason = await report(null);
+        if (published !== undefined && published.length === 0) return;
+        const reason = await report([]);
         if (reason !== null) {
           notify(new Error(`herdr clear-token failed: ${reason}`));
           return;
         }
-        published = null;
+        published = [];
       })();
       return disposal;
     },

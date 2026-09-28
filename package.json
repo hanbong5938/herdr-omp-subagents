@@ -1,6 +1,6 @@
 {
   "name": "herdr-omp-subagents",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Herdr native sidebar metadata for live OMP subagent models",
