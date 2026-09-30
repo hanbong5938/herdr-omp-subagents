@@ -17,13 +17,24 @@ HERDR=${HERDR_BIN_PATH:-herdr}
 
 sidebar_help() {
   printf '%s\n' \
-    'Required sidebar setup: add one row per slot to [ui.sidebar.agents] rows' \
-    '  in ~/.config/herdr/config.toml, before ["$cache"], keeping existing rows:' \
+    'Sidebar setup (this script edits no config): in ~/.config/herdr/config.toml,' \
+    '  [ui.sidebar.agents] rows, keep your existing rows and add:' \
+    '  "$main_model" to the row that has "agent", e.g. ["agent", "$main_model"]' \
+    '  one row per child slot, in order, before ["$cache"] if present:' \
     '  ["$subagents_1"], ["$subagents_2"], ["$subagents_3"], ["$subagents_4"],' \
-    'One agent per row; the fourth row becomes +N when more are active.' \
-    'Unused rows disappear. Optional style: [{ token = "$subagents_1", fg = "#56b6c2" }]' \
+    '  ["$subagents_5"], ["$subagents_6"], ["$subagents_7"], ["$subagents_8"],' \
+    '  ["$subagents_9"], ["$subagents_10"], ["$subagents_11"], ["$subagents_12"],' \
+    '  ["$subagents_13"],' \
+    'Herdr draws at most 16 rows: state, agent and cache rows leave 13 child slots;' \
+    '  each other custom row costs one. Unused rows disappear.' \
+    'Optional style: [{ token = "$subagents_1", fg = "#56b6c2" }]' \
     'Then run: herdr server reload-config' \
-    'Use /herdr-subagents inside OMP for live identities and activation status.'
+    'Child rows: maxRows in config.json in the directory printed by' \
+    '  herdr plugin config-dir omp-subagents, e.g. {"maxRows": 8}' \
+    '  Integer 0..13; missing file means 4; the last allowed row becomes +N.' \
+    '  Invalid values keep the last valid one; OMP re-reads the file every 5 s.' \
+    '  Keep maxRows at or below the number of $subagents_N rows you list.' \
+    'Use /herdr-subagents inside OMP for live identities, max rows and activation status.'
 }
 
 case "$COMMAND" in
@@ -47,7 +58,8 @@ case "$COMMAND" in
     printf '%s\n' \
       'Verified on OMP 18.1.20 and 18.4.1; requires the AgentRegistry SDK export.' \
       'Keep omp-subagents enabled in Herdr; marketplace installations are already registered.'
-    printf '%s\n' 'Restart each already-running OMP session to load this new extension.' \
+    printf '%s\n' 'Newly installed: running OMP sessions have not loaded it; restart each to load it.' \
+      'Already installed: running OMP sessions keep the bridge code they loaded; restart each to load updates.' \
       'After the current task finishes, quit OMP, then use omp --resume <session-id>.' \
       'Linking or /reload-plugins does not load newly installed extension modules.'
     sidebar_help
@@ -86,6 +98,27 @@ case "$COMMAND" in
     else
       printf '%s\n' 'Herdr plugin omp-subagents is not installed or not enabled; install, link or enable it.' >&2
       exit 1
+    fi
+    # The bridge asks Herdr for the same directory; only the path is reported here.
+    CONFIG_DIR=$("$HERDR" plugin config-dir omp-subagents) || {
+      printf '%s\n' 'Cannot resolve the plugin config directory: herdr plugin config-dir omp-subagents failed.' >&2
+      exit 1
+    }
+    case "$CONFIG_DIR" in
+      *'
+'*|''|[!/]*)
+        printf 'Herdr returned an invalid plugin config directory: %s\n' "$CONFIG_DIR" >&2
+        exit 1 ;;
+    esac
+    CONFIG_FILE="$CONFIG_DIR/config.json"
+    if test -f "$CONFIG_FILE"; then
+      printf 'Plugin settings: %s\n' "$CONFIG_FILE"
+      printf '%s\n' 'OMP validates maxRows on every 5 s read; /herdr-subagents shows the effective value and any error.'
+    elif test -e "$CONFIG_FILE"; then
+      printf 'Plugin settings path is not a regular file: %s\n' "$CONFIG_FILE" >&2
+      exit 1
+    else
+      printf 'Plugin settings: %s (absent; maxRows defaults to 4)\n' "$CONFIG_FILE"
     fi
     printf 'Pane: %s\nSocket: %s\n' "${HERDR_PANE_ID:-not inside Herdr}" "${HERDR_SOCKET_PATH:-unset}"
     printf '%s\n' 'No provider requests made. Use /herdr-subagents to verify the live OMP API.'

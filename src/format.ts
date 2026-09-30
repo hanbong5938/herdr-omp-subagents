@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { ROW_TOKENS, type ActiveAgent } from "./types.ts";
+import type { ActiveAgent, ModelIdentity } from "./types.ts";
 
 /** Herdr's per-token limit; role (18) + ordinal + model (26) rows stay well under it. */
 export const MAX_TOKEN_BYTES = 80;
@@ -37,10 +37,20 @@ function modelLabel(modelId?: string): string {
 }
 
 /**
- * One label per sidebar row, at most `ROW_TOKENS.length`. When more agents are
- * active than rows exist, the last row becomes `+N` for the ones not shown.
+ * Parenthesized short label for the root session's model. Absent until the root
+ * attaches, so the sidebar clears instead of showing a stale or guessed model.
  */
-export function formatAgents(agents: readonly ActiveAgent[]): string[] {
+export function formatMainModel(main?: ModelIdentity): string | undefined {
+  return main ? `(${modelLabel(main.modelId)})` : undefined;
+}
+
+/**
+ * One label per sidebar row, at most `maxRows` including the overflow row. When
+ * more agents are active than rows allowed, the last row becomes `+N` for the
+ * ones not shown.
+ */
+export function formatAgents(agents: readonly ActiveAgent[], maxRows: number): string[] {
+  if (maxRows <= 0) return [];
   const items = agents.map(agent => ({
     id: agent.id,
     role: shorten(clean(agent.role).replace(/[:#]/g, "-") || "unknown", 18),
@@ -54,7 +64,7 @@ export function formatAgents(agents: readonly ActiveAgent[]): string[] {
     ordinals.set(item.role, ordinal);
     return `${item.role}${counts.get(item.role)! > 1 ? `#${ordinal}` : ""}:${item.model}`;
   });
-  if (labels.length <= ROW_TOKENS.length) return labels;
-  const shown = ROW_TOKENS.length - 1;
+  if (labels.length <= maxRows) return labels;
+  const shown = maxRows - 1;
   return [...labels.slice(0, shown), `+${labels.length - shown}`];
 }

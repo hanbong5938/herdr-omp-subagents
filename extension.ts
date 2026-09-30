@@ -7,9 +7,18 @@ import {
   observeAgents,
   resolveRootStatus,
 } from "./src/collector.ts";
-import { formatAgents } from "./src/format.ts";
-import { createReporter, type Reporter, type Rows } from "./src/reporter.ts";
-import { HEARTBEAT_MS, type ActiveAgent, type PaneBinding } from "./src/types.ts";
+import { formatAgents, formatMainModel } from "./src/format.ts";
+import { createReporter, type Reporter } from "./src/reporter.ts";
+import { createSettingsReader, type SettingsReader } from "./src/settings.ts";
+import {
+  DEFAULT_MAX_ROWS,
+  HEARTBEAT_MS,
+  type ActiveAgent,
+  type AgentSnapshot,
+  type DisplayState,
+  type ModelIdentity,
+  type PaneBinding,
+} from "./src/types.ts";
 
 /**
  * Model switches inside an already-running agent emit no registry event, so the
@@ -65,11 +74,20 @@ interface Publisher {
 
 /** Versioned: a reload must not reuse a reporter built for an older token contract. */
 const CLAIM_HOST = globalThis as unknown as {
-  __herdrOmpSubagentPublishersV2__?: Map<string, Publisher>;
+  __herdrOmpSubagentPublishersV3__?: Map<string, Publisher>;
 };
 
 function publishers(): Map<string, Publisher> {
-  return (CLAIM_HOST.__herdrOmpSubagentPublishersV2__ ??= new Map());
+  return (CLAIM_HOST.__herdrOmpSubagentPublishersV3__ ??= new Map());
+}
+
+/** Clears the main model and every child row. */
+const CLEARED: DisplayState = { rows: [] };
+
+function render(snapshot: AgentSnapshot, maxRows: number): DisplayState {
+  const rows = formatAgents(snapshot.agents, maxRows);
+  const mainModel = formatMainModel(snapshot.main);
+  return mainModel === undefined ? { rows } : { mainModel, rows };
 }
 
 /** The pane this OMP process runs in, as exported by `herdr`. */
@@ -106,8 +124,8 @@ function describe(agent: ActiveAgent): string {
 }
 
 /**
- * Owns the lifecycle: bind to the pane, observe this session's descendants,
- * and publish the token while Herdr keeps the plugin enabled.
+ * Owns the lifecycle: bind to the pane, observe this session's root model and
+ * descendants, and publish the tokens while Herdr keeps the plugin enabled.
  */
 class Bridge {
   /** Invalidates every timer tick, observer callback and in-flight check. */
@@ -119,16 +137,21 @@ class Bridge {
   #registry: AgentRegistryLike | null = null;
   #observer: AgentObserver | null = null;
   #reporter: Reporter | null = null;
+  /** Created by the owner only, so a subagent's copy never spawns the CLI. */
+  #settings: SettingsReader | null = null;
   #timers: HostTimer[] = [];
   #rootSessionId = "";
   #claimed = false;
   #enabled = false;
   #activationInFlight = false;
-  /** Newest formatted sidebar rows, kept current even while disabled. */
-  #desired: Rows = [];
+  /** Newest formatted sidebar state, kept current even while disabled. */
+  #desired: DisplayState = CLEARED;
+  /** Effective child-row limit from the plugin config, last valid read. */
+  #maxRows = DEFAULT_MAX_ROWS;
   #state = "not started";
   #activationError: string | null = null;
   #reportError: string | null = null;
+  #settingsError: string | null = null;
   #warnedUnsupported = false;
 
   constructor(private readonly pi: HostApi) {}
@@ -159,9 +182,9 @@ class Bridge {
     this.#registry = registry;
     this.#rootSessionId = rootSessionId;
     this.#state = "waiting for the root agent to attach";
-    this.#observer = observeAgents(registry, rootSessionId, agents => {
+    this.#observer = observeAgents(registry, rootSessionId, snapshot => {
       if (generation !== this.#generation) return;
-      this.#desired = formatAgents(agents);
+      this.#desired = render(snapshot, this.#maxRows);
       this.#publish();
     });
     // A managed timer isolates a rejected callback result, so every async
@@ -178,7 +201,7 @@ class Bridge {
     await this.#teardown("stopped", true);
   }
 
-  /** `/herdr-subagents`: exact current identities plus binding and gate state. */
+  /** `/herdr-subagents`: exact current identities plus binding, settings and gate state. */
   report(ctx: HostContext): void {
     const binding = this.#binding;
     const lines = [
@@ -186,21 +209,28 @@ class Bridge {
         ? `pane ${binding.paneId} · socket ${binding.socketPath} · cli ${binding.herdrBin}`
         : "pane: unbound",
       `state: ${this.#state}`,
+      `max rows: ${this.#maxRows} · config ${this.#settings?.path ?? "unresolved"}`,
     ];
     if (this.#claimed) {
+      const { mainModel, rows } = this.#desired;
       lines.push(`herdr plugin: ${this.#enabled ? "enabled" : "disabled or unreachable"}`);
-      lines.push(`rows: ${this.#desired.length === 0 ? "cleared" : this.#desired.join(" / ")}`);
+      lines.push(`main token: ${mainModel ?? "cleared"}`);
+      lines.push(`rows: ${rows.length === 0 ? "cleared" : rows.join(" / ")}`);
     }
     if (this.#activationError) lines.push(`activation check: ${this.#activationError}`);
+    if (this.#settingsError) lines.push(`last settings error: ${this.#settingsError}`);
     if (this.#reportError) lines.push(`last report error: ${this.#reportError}`);
 
-    const agents = this.#observer?.snapshot() ?? [];
+    const { main, agents } = this.#observer?.snapshot() ?? { agents: [] };
+    lines.push(main
+      ? `main: ${main.provider ?? "unknown"}/${main.modelId ?? "unknown"}`
+      : "main: root agent not attached");
     if (agents.length === 0) {
       lines.push("no active subagents");
     } else {
       for (const agent of agents) lines.push(describe(agent));
     }
-    const severity = this.#activationError || this.#reportError ? "warning" : "info";
+    const severity = this.#activationError || this.#settingsError || this.#reportError ? "warning" : "info";
     ctx.ui.notify(lines.join("\n"), this.#registry ? severity : "warning");
   }
 
@@ -236,9 +266,9 @@ class Bridge {
       return;
     }
     observer.refresh();
-    // Gate the first publish on Herdr's own view of the plugin rather than
-    // waiting out a heartbeat; a token left behind by a previous process is
-    // cleared through the same path.
+    // Gate the first publish on Herdr's own view of the plugin and on the
+    // configured row limit rather than waiting out a heartbeat; a token left
+    // behind by a previous process is cleared through the same path.
     if (claimedNow) await this.#checkActivation(generation);
   }
 
@@ -246,6 +276,7 @@ class Bridge {
     const binding = this.#binding;
     const observer = this.#observer;
     if (!binding || !observer) return;
+    const generation = this.#generation;
     this.#claimKey = `${binding.socketPath}\u0000${binding.paneId}`;
     const onError = (error: Error) => {
       this.#reportError = error.message;
@@ -264,13 +295,21 @@ class Bridge {
       publisher.token = this.#token;
       publisher.onError = onError;
     }
+    // The reader reports each distinct failure once and keeps its last valid
+    // value, seeded with this bridge's, so a bad config never gates activation
+    // and a session switch never falls back to the default.
+    this.#settings = createSettingsReader(binding, error => {
+      if (generation !== this.#generation) return;
+      this.#settingsError = error.message;
+      this.pi.logger.warn("herdr-subagents: plugin settings unreadable", { error: error.message });
+    }, this.#maxRows);
     this.#claimed = true;
     this.#state = "publishing";
     this.#reporter = publisher.reporter;
-    this.#reporter.set([]);
+    this.#reporter.set(CLEARED);
     // Agents may already be running (session switch mid-run, late attach), and
     // those never produced a change callback.
-    this.#desired = formatAgents(observer.snapshot());
+    this.#desired = render(observer.snapshot(), this.#maxRows);
   }
 
   #publish(): void {
@@ -281,37 +320,50 @@ class Bridge {
   }
 
   /**
-   * Herdr can disable or unlink the plugin while the OMP extension stays
-   * installed, so enablement is re-read before every heartbeat: disabled
-   * clears the token, re-enabled restores the current snapshot, and no reload
-   * is needed either way.
+   * Herdr can disable or unlink the plugin, or its config can change, while
+   * the OMP extension stays installed, so both are re-read before every
+   * heartbeat: disabled clears the tokens, re-enabled restores the current
+   * snapshot, a new row limit reformats it, and no reload is needed.
    */
   async #checkActivation(generation: number): Promise<void> {
     if (generation !== this.#generation) return;
     const binding = this.#binding;
     const reporter = this.#reporter;
-    if (!binding || !reporter || !this.#claimed || this.#activationInFlight) return;
+    const settings = this.#settings;
+    const observer = this.#observer;
+    if (!binding || !reporter || !settings || !observer || !this.#claimed || this.#activationInFlight) return;
     if (publishers().get(this.#claimKey)?.token !== this.#token) return;
     this.#activationInFlight = true;
     try {
-      const enabled = await isPluginEnabled(binding);
-      // Shutdown or a session switch raced the check: its process is gone.
+      // Independent failures: a bad config keeps the last valid limit, and an
+      // unreachable host does not discard a freshly read one.
+      const [activation, maxRows] = await Promise.allSettled([isPluginEnabled(binding), settings.read()]);
+      // Shutdown, a session switch or a newer owner raced the check: its result is stale.
       if (generation !== this.#generation || publishers().get(this.#claimKey)?.token !== this.#token) return;
+      if (maxRows.status === "fulfilled") {
+        this.#maxRows = maxRows.value;
+      } else {
+        this.#settingsError = maxRows.reason instanceof Error ? maxRows.reason.message : String(maxRows.reason);
+      }
+      this.#desired = render(observer.snapshot(), this.#maxRows);
+      if (activation.status === "rejected") {
+        // Stop refreshing rather than hammering an unreachable host: the tokens
+        // carry a TTL, so a stale value expires on its own.
+        this.#enabled = false;
+        this.#state = "idle: activation check failed";
+        const error = activation.reason;
+        this.#activationError = error instanceof Error ? error.message : String(error);
+        this.pi.logger.warn("herdr-subagents: plugin activation check failed", {
+          error: this.#activationError,
+        });
+        return;
+      }
+      const enabled = activation.value;
       this.#activationError = null;
       this.#enabled = enabled;
       this.#state = enabled ? "publishing" : "idle: plugin disabled in Herdr";
-      reporter.set(enabled ? this.#desired : []);
+      reporter.set(enabled ? this.#desired : CLEARED);
       reporter.heartbeat();
-    } catch (error) {
-      if (generation !== this.#generation) return;
-      // Stop refreshing rather than hammering an unreachable host: the token
-      // carries a TTL, so a stale value expires on its own.
-      this.#enabled = false;
-      this.#state = "idle: activation check failed";
-      this.#activationError = error instanceof Error ? error.message : String(error);
-      this.pi.logger.warn("herdr-subagents: plugin activation check failed", {
-        error: this.#activationError,
-      });
     } finally {
       if (generation === this.#generation) this.#activationInFlight = false;
     }
@@ -325,7 +377,8 @@ class Bridge {
     this.#observer = null;
     this.#registry = null;
     this.#binding = null;
-    this.#desired = [];
+    this.#settings = null;
+    this.#desired = CLEARED;
     this.#enabled = false;
     this.#activationInFlight = false;
     this.#state = state;
@@ -338,7 +391,7 @@ class Bridge {
       // Keep the writer alive but idle. A new owner reuses its queue, so this
       // clear cannot arrive after that owner's newer value.
       publisher.token = {};
-      reporter.set([]);
+      reporter.set(CLEARED);
       await reporter.flush();
     }
   }
@@ -364,7 +417,7 @@ export default function herdrSubagents(pi: HostApi): void {
   pi.on("session_switch", (_event, ctx) => bridge.start(ctx));
   pi.on("session_shutdown", () => bridge.stop());
   pi.registerCommand(COMMAND, {
-    description: "Show the live subagent identities reported to the Herdr sidebar",
+    description: "Show the main model, row limit and live subagent identities reported to the Herdr sidebar",
     handler: async (_args, ctx) => {
       bridge.report(ctx);
     },

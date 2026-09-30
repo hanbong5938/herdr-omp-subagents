@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import type { ActiveAgent } from "./types.ts";
+import type { ActiveAgent, AgentSnapshot, ModelIdentity } from "./types.ts";
 
 /**
  * Structural subset of OMP's process-global agent registry
@@ -47,8 +47,11 @@ export interface AgentRegistryLike {
 }
 
 export interface AgentObserver {
-  /** Current active descendants of the observed root, deepest-last. */
-  snapshot(): ActiveAgent[];
+  /**
+   * Current root model (absent until the root attaches) and its active
+   * descendants, deepest-last.
+   */
+  snapshot(): AgentSnapshot;
   /** Recollect; invokes the change callback only when the reported value moved. */
   refresh(): void;
   /** Unsubscribe; later refreshes and registry events are inert. */
@@ -132,7 +135,7 @@ function depthFromRoot(
   return -1;
 }
 
-function collect(registry: AgentRegistryLike, rootSessionId: string): ActiveAgent[] {
+function collect(registry: AgentRegistryLike, rootSessionId: string): AgentSnapshot {
   const refs = registry.list();
   const byId = new Map<string, RegistryAgentRef>();
   let root: RegistryAgentRef | undefined;
@@ -140,7 +143,13 @@ function collect(registry: AgentRegistryLike, rootSessionId: string): ActiveAgen
     byId.set(ref.id, ref);
     if (ref.kind === "main" && ref.session?.sessionManager.getSessionId() === rootSessionId) root = ref;
   }
-  if (!root) return [];
+  if (!root) return { agents: [] };
+  // The root's own live session model, read regardless of status: an idle
+  // root is still the main agent. Children never stand in for it.
+  const main: ModelIdentity = {};
+  const rootModel = root.session?.model;
+  if (rootModel?.provider) main.provider = rootModel.provider;
+  if (rootModel?.id) main.modelId = rootModel.id;
   // The root ref outlives a session switch: its `sessionManager` re-points at
   // the new session while `parentId` links from the previous generation's
   // children still name it. The live transcript path is what separates the two.
@@ -170,28 +179,35 @@ function collect(registry: AgentRegistryLike, rootSessionId: string): ActiveAgen
     rows.push({ depth, agent });
   }
   rows.sort((a, b) => a.depth - b.depth || (a.agent.id < b.agent.id ? -1 : a.agent.id > b.agent.id ? 1 : 0));
-  return rows.map(row => row.agent);
+  return { main, agents: rows.map(row => row.agent) };
 }
 
 /** Identity of a reported snapshot, for change detection. */
-function identity(agents: readonly ActiveAgent[]): string {
-  let key = "";
-  for (const agent of agents) {
+function identity(snapshot: AgentSnapshot): string {
+  const main = snapshot.main;
+  // Absent (unattached) and `{}` (attached, unknown model) must differ.
+  let key = main ? `+${main.provider ?? ""}\u0000${main.modelId ?? ""}\u0002` : "-\u0002";
+  for (const agent of snapshot.agents) {
     key += `${agent.id}\u0000${agent.parentId ?? ""}\u0000${agent.role}\u0000${agent.provider ?? ""}\u0000${agent.modelId ?? ""}\u0001`;
   }
   return key;
 }
 
+function copySnapshot(snapshot: AgentSnapshot): AgentSnapshot {
+  const agents = snapshot.agents.slice();
+  return snapshot.main ? { main: { ...snapshot.main }, agents } : { agents };
+}
+
 /**
- * Observe every active descendant of the session identified by
- * `rootSessionId`. `onChange` fires only when the reported set, its lineage or
- * a live model actually moved — nested descendants and `/model` switches
- * included, since each row reads its ref's live session.
+ * Observe the root model and every active descendant of the session
+ * identified by `rootSessionId`. `onChange` fires only when the reported
+ * value actually moved — the root attaching or switching `/model`, the set of
+ * descendants, their lineage or a live child model.
  */
 export function observeAgents(
   registry: AgentRegistryLike,
   rootSessionId: string,
-  onChange: (agents: ActiveAgent[]) => void,
+  onChange: (snapshot: AgentSnapshot) => void,
 ): AgentObserver {
   let disposed = false;
   let current = collect(registry, rootSessionId);
@@ -204,7 +220,7 @@ export function observeAgents(
     if (nextIdentity === currentIdentity) return;
     current = next;
     currentIdentity = nextIdentity;
-    onChange(current.slice());
+    onChange(copySnapshot(current));
   }
 
   // Registry events (register/status/metadata/remove) are the low-latency edge;
@@ -213,13 +229,13 @@ export function observeAgents(
   const unsubscribe = registry.onChange(refresh);
 
   return {
-    snapshot: () => current.slice(),
+    snapshot: () => copySnapshot(current),
     refresh,
     dispose: () => {
       if (disposed) return;
       disposed = true;
       unsubscribe();
-      current = [];
+      current = { agents: [] };
       currentIdentity = identity(current);
     },
   };
