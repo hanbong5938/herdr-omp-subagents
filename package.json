@@ -1,6 +1,6 @@
 {
   "name": "herdr-omp-subagents",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "type": "module",
   "description": "Show the current main OMP model and running subagent models in Herdr's agents sidebar",
