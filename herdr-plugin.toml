@@ -1,6 +1,6 @@
 id = "omp-subagents"
 name = "OMP Subagent Models"
-version = "0.3.0"
+version = "0.3.1"
 min_herdr_version = "0.8.0"
 platforms = ["macos", "linux"]
 description = "Show the current main OMP model and running subagent models in Herdr's agents sidebar"

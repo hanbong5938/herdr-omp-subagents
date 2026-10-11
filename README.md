@@ -346,6 +346,8 @@ does not touch your config.
 
 ## Release note
 
+**v0.3.1**
+
 Onboarding starts with four child slots when the existing layout has room.
 Quick start and installer guidance account for Herdr's 16 configured-row limit,
 reuse existing slots, and explain explicit smaller `maxRows` settings without
