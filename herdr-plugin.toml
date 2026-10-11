@@ -3,7 +3,7 @@ name = "OMP Subagent Models"
 version = "0.3.0"
 min_herdr_version = "0.8.0"
 platforms = ["macos", "linux"]
-description = "Display the main OMP model and configurable live subagent rows in the native agents sidebar"
+description = "Show the current main OMP model and running subagent models in Herdr's agents sidebar"
 
 [[actions]]
 id = "install-bridge"

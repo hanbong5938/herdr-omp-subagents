@@ -5,29 +5,34 @@
 ![OMP 18.1.20+](https://img.shields.io/badge/OMP-18.1.20%2B-informational)
 ![platforms: macOS • Linux](https://img.shields.io/badge/platforms-macOS%20%E2%80%A2%20Linux-informational)
 
-A [Herdr](https://herdr.dev) plugin that shows which model an
-[OMP](https://github.com/can1357/oh-my-pi) session is using, and which model each
-of its running subagents is using, under the OMP pane in Herdr's agents sidebar.
+When several [OMP](https://github.com/can1357/oh-my-pi) panes are open in
+[Herdr](https://herdr.dev), the agents sidebar can show the
+current model of each pane's main agent without switching panes. This plugin
+also shows the models of subagents while they are running. Even with no child
+running, the main-model row is useful: it stays visible while the session is
+attached, idle or busy, and follows `/model`. Child rows disappear when the
+children finish. This is a current-model display, not a completion, progress,
+or usage dashboard.
 
-```
-◐ omp · 1 · omp › π ⠋ Fix login flow
-  omp (opus-5-5)
-  scout:sonnet-5
-  task#1:opus-5-5
-  task#2:opus-5-5
-  +2
+Observed in a Herdr 0.9.3 / OMP 18.9.1 terminal session (text excerpts, not
+screenshots):
+
+```text
+○ onboarding-smoke
+  probe · (gpt-6.1-sol)
 ```
 
-The main agent's model sits next to the agent name whenever the session is
-attached, idle or busy, and follows `/model`. Subagent rows appear when a
-subagent starts, follow `/model` switches while it runs, and disappear when it
-finishes. With no subagents running only the main model is shown.
+While a sonic child was running, an additional row showed:
+
+```text
+  sonic:gpt-6.1-sol
+```
 
 ## Quick start
 
 > [!NOTE]
-> Requires Herdr 0.8+ and OMP 18.1.20+ on macOS or Linux. Tested on Herdr 0.9.1
-> with OMP 18.1.20 and 18.4.1.
+> Requires Herdr 0.8+ and OMP 18.1.20+ on macOS or Linux. Also observed on
+> Herdr 0.9.3 with OMP 18.9.1.
 
 **1. Install the plugin**
 
@@ -44,20 +49,120 @@ The plugin ships an OMP extension that reads OMP's live agent registry. The
 herdr plugin action invoke install-bridge --plugin omp-subagents
 ```
 
-With a named OMP profile, or a non-default agent directory, run the script
-directly and pass the directory:
+For a named profile or a non-default agent directory, see
+[Advanced setup](#advanced-setup).
+
+**3. Add sidebar tokens to your existing layout**
+
+The plugin publishes `$main_model` and child slots `$subagents_1` through
+`$subagents_13`, but tokens only appear where your layout includes them. Edit
+`[ui.sidebar.agents]` `rows` in the Herdr config in use, preserving your
+existing rows, tokens and styles. Put `$main_model` alongside `agent` in its
+existing row if possible; otherwise reserve one new row for it. Add only
+missing child slots, starting with `$subagents_1` and numbered consecutively;
+reuse slots already in the layout instead of duplicating them. Neither `$ctx`
+nor `$cache` is required.
+
+Herdr accepts at most **16 configured rows**, including rows whose tokens are
+currently empty. Count your existing rows (including any child rows) before
+adding anything. If the main model needs a new row, subtract one more from
+`16 - existing rows`; the remainder is the maximum number of *new* child rows
+you can add. If even the main row will not fit, first free or rework a row.
+With `agent` already in a row, `$main_model` added there and no child slots
+yet, the available new child rows are:
+
+| Existing rows | New child rows available |
+| --- | --- |
+| 12 | 4 |
+| 13 | 3 |
+| 15 | 1 |
+| 16 | 0 |
+
+With no `config.json`, the bridge publishes four child slots by default; an
+empty child token is not displayed, but its configured row still counts toward
+16. Count the child slots already present toward your configured `maxRows`
+(including the default four), then add only missing slots that fit. If the
+existing and newly added consecutive slots cannot reach `maxRows`, either
+free/rework existing rows or explicitly set `maxRows` to the number of
+consecutive child slots you can show, even `0`. Keep an existing valid value,
+such as `8`, unless you explicitly change it; do not silently reset it to `4`.
+See [More or fewer child rows](#more-or-fewer-child-rows) for the plugin config
+directory and setting. Do not replace an existing layout with the example
+below unless starting from an empty config.
+
+For a new layout only, a complete minimal example is:
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "workspace", "tab"],
+  ["agent", "$main_model"],
+  ["$subagents_1"],
+  ["$subagents_2"],
+  ["$subagents_3"],
+  ["$subagents_4"],
+]
+```
+
+Edit the config used by the **Herdr client rendering the sidebar** (normally
+`~/.config/herdr/config.toml`, or the client's `HERDR_CONFIG_PATH` if set).
+The OMP execution host runs the bridge; changing its config does not change a
+different client's sidebar layout.
+
+**4. Reload the layout and start OMP**
+
+```sh
+herdr config check
+herdr server reload-config
+```
+
+Start a new OMP session from a Herdr pane, or let an existing session finish
+its current work, quit it, and reopen it with `omp --resume <session-id>`.
+OMP loads the newly linked extension at startup; `/reload-plugins` does not
+pick up a new link. Check for the main model beside the agent name in the
+actual sidebar, even when no child is running. A child row appears only during
+that child's run. For diagnostics if it does not appear, see
+[Troubleshooting](#troubleshooting).
+
+## Advanced setup
+
+### Named profiles and non-default agent directories
+
+The default `install-bridge` action links into `~/.omp/agent/extensions/`.
+For a named OMP profile or another agent directory, locate the installed
+plugin with `herdr plugin list --json` and run its script explicitly (requires
+`jq`):
 
 ```sh
 sh "$(herdr plugin list --json | jq -r '.result.plugins[] | select(.plugin_id=="omp-subagents") | .plugin_root')/scripts/plugin.sh" \
   install ~/.omp/profiles/<profile>/agent
 ```
 
-**3. Add the sidebar tokens**
+### More or fewer child rows
 
-Custom metadata tokens only render where your sidebar layout asks for them. The
-plugin publishes `$main_model` and up to thirteen child slots, `$subagents_1`
-through `$subagents_13`. Add them to `[ui.sidebar.agents]` in
-`~/.config/herdr/config.toml`, keeping your existing rows. A complete layout:
+`maxRows` is an integer from `0` to `13`; with no `config.json`, it is `4`.
+Find the settings directory with:
+
+```sh
+herdr plugin config-dir omp-subagents
+```
+
+If `config.json` is missing, create it there to change the default; if it
+already exists, edit its `maxRows` value instead. For example, in
+`~/.config/herdr/plugins/config/omp-subagents/config.json`:
+
+```json
+{ "maxRows": 8 }
+```
+
+The two settings are separate: `rows` is the sidebar layout read by the
+rendering Herdr client; `maxRows` is read by the bridge inside each OMP process
+from the plugin config path Herdr reports, and limits how many child rows it
+publishes. A running bridge re-reads `config.json` every 5 s without a reload.
+See [Row limit](#row-limit) for invalid values.
+
+For a new layout showing all 13 slots (not a replacement for existing custom
+rows), use:
 
 ```toml
 [ui.sidebar.agents]
@@ -81,58 +186,23 @@ rows = [
 ]
 ```
 
-`$ctx` and `$cache` stand for custom tokens other plugins publish. Keep the ones
-your layout already has and drop the ones it does not. A row whose tokens are
-not reported disappears, so the unused child slots take no space.
-
-Herdr draws at most 16 rows per agent. The three chrome rows above (state,
-agent, cache) leave 13 for child slots. Every additional custom row costs one
-child slot: list fewer `$subagents_N` rows, always starting from `$subagents_1`,
-and keep `maxRows` (step 4) no higher than the number of slots you list, or the
-highest rows, including the `+N` row, are published into slots Herdr never
-draws.
-
-Then reload:
-
-```sh
-herdr server reload-config
-```
-
-**4. Choose how many child rows to show (optional)**
-
-The number of child rows is a plugin setting, `maxRows`, an integer from `0` to
-`13`. Without a settings file it is `4`. Find the settings directory with:
-
-```sh
-herdr plugin config-dir omp-subagents
-```
-
-and create `config.json` in it, for example
-`~/.config/herdr/plugins/config/omp-subagents/config.json`:
-
-```json
-{ "maxRows": 8 }
-```
-
-The two settings live in different places and neither edits the other: `rows`
-is Herdr's sidebar layout in the `config.toml` Herdr reads, and decides which
-tokens are drawn; `maxRows` is read by the bridge inside each OMP process, from
-the path Herdr reports for this plugin, and decides how many child rows are
-published. Every running bridge re-reads `config.json` every 5 s, so a change
-applies without reloading anything. See [Row limit](#row-limit) for invalid
-values.
-
-**5. Restart OMP**
-
-OMP loads extensions at startup, and the bridge is a new extension module.
-After each running OMP session finishes its current task, quit it and reopen it
-with `omp --resume <session-id>`; `/reload-plugins` does not pick up a newly
-linked extension.
+`$ctx` and `$cache` are optional custom tokens from other plugins: keep them
+only if your layout uses them. Herdr accepts no more than 16 configured rows
+per agent, even if some tokens are empty. The three rows above outside the
+child slots leave room for 13 child rows; every additional custom row requires
+freeing or reworking another row to keep this limit. Preserve existing rows
+and styles; place `$main_model` alongside `agent` where possible, count any
+new main row against the limit, reuse existing child slots, and add only
+missing consecutive slots beginning at `$subagents_1`. If existing and newly
+added consecutive slots cannot reach an existing `maxRows`, explicitly lower
+it to the visible consecutive slot count (including `0`) or free/rework rows.
+Leaving `maxRows` higher than the slots listed means some published rows
+(including `+N`) will not be drawn.
 
 ## What the rows say
 
 `$main_model` is the main agent's model in parentheses, for example
-`(opus-5-5)`. Each child row is `role:model`:
+`(gpt-6.1-sol)`. Each child row is `role:model`:
 
 | Part | Source |
 | --- | --- |
@@ -225,27 +295,33 @@ flowchart LR
 | Where | Command | Does |
 | --- | --- | --- |
 | Herdr | `herdr plugin action invoke install-bridge --plugin omp-subagents` | Link the OMP extension. Replaces a broken link left by an update or a moved checkout; refuses to overwrite any other file. Prints the sidebar and settings setup; edits no config. |
-| Herdr | `herdr plugin action invoke doctor --plugin omp-subagents` | Check the Herdr metadata flags, the bridge link and its target, that the plugin is enabled, and report the resolved `config.json` path and whether it exists. Makes no model requests and publishes no metadata. |
-| OMP | `/herdr-subagents` | Show the pane binding, bridge state, effective `maxRows` and its config path, the published main token and rows, the last settings error, the main model and every running subagent with its full `provider/model` id. |
+| Herdr | `herdr plugin action invoke doctor --plugin omp-subagents` | Check the bridge link and target, Herdr CLI and metadata flags, whether the plugin is enabled, and the resolved `config.json` location and existence. Makes no model requests; does not check a live OMP session or prove sidebar rendering. |
+| OMP | `/herdr-subagents` | Show pane binding, bridge state, effective `maxRows` and config path, desired main token and child rows, last settings error, and current main and running-child `provider/model` ids. Desired values do not prove successful metadata publication or UI rendering. |
 
 ## Troubleshooting
 
-**No rows appear.** Run `doctor`, then `/herdr-subagents` inside OMP.
+**No model appears in the sidebar.** Check each layer in order:
 
-- `pane: unbound`: OMP was not started from a Herdr pane.
-- `unsupported: … AgentRegistry API`: this OMP build does not expose the agent
-  registry the bridge reads.
-- `idle: plugin disabled in Herdr`: run `herdr plugin enable omp-subagents`.
-- `/herdr-subagents` is not a known command: OMP has not loaded the extension.
-  Check the link with `doctor` and restart OMP.
-- The state is `publishing` but the sidebar is empty: `$main_model` or the
-  `$subagents_N` rows are missing from `[ui.sidebar.agents] rows`, or the config
-  was not reloaded.
-- Fewer child rows than expected, or no `+N` row: compare `max rows` in
-  `/herdr-subagents` with the number of `$subagents_N` rows in your layout, and
-  check `last settings error`.
-- `/herdr-subagents` shows no `max rows` line: that session is still running
-  the bridge it loaded before an upgrade. Restart it as below.
+1. **Installation:** Run `herdr plugin action invoke doctor --plugin
+   omp-subagents`. If the link is missing or broken, run `install-bridge`; if
+   disabled, run `herdr plugin enable omp-subagents`. Doctor checks the link,
+   CLI, enabled state and config location, not a live UI.
+2. **OMP session:** Run `/herdr-subagents` in the OMP pane. If the command is
+   unknown, restart OMP after installing the bridge. `pane: unbound` means OMP
+   was not started from a Herdr pane; start it there. `unsupported: …
+   AgentRegistry API` means this OMP build does not expose the registry the
+   bridge reads. `idle: plugin disabled in Herdr` calls for enabling the
+   plugin. If no `max rows` line appears after an upgrade, restart OMP to load
+   the new bridge.
+3. **Layout and display:** `/herdr-subagents` reports *desired* tokens and
+   rows, not a server acknowledgment or proof of sidebar rendering. If the
+   bridge says `publishing` but no model appears, check `$main_model` and the
+   `$subagents_N` tokens in the rendering client's `[ui.sidebar.agents] rows`
+   (and its `HERDR_CONFIG_PATH`), reload that client's config, then look at
+   the actual sidebar. A child row also requires a running child.
+4. **Child row limit:** For fewer rows or a missing `+N`, compare `max rows`
+   with the child slots actually listed in the layout and check
+   `last settings error`. See [Row limit](#row-limit).
 
 **Upgrading.** Add `$main_model` to the agent row and the `$subagents_5`
 through `$subagents_13` rows your row budget allows, then reload the config.
@@ -267,6 +343,14 @@ the `$subagents_N` rows from your sidebar config afterwards, and delete the
 `config.json` you created, if any (find its directory with
 `herdr plugin config-dir omp-subagents` before uninstalling the plugin); Herdr
 does not touch your config.
+
+## Release note
+
+Onboarding starts with four child slots when the existing layout has room.
+Quick start and installer guidance account for Herdr's 16 configured-row limit,
+reuse existing slots, and explain explicit smaller `maxRows` settings without
+changing user config. Doctor repair commands preserve shell-special paths.
+Diagnostics distinguish desired bridge output from a confirmed UI display.
 
 ## Development
 
