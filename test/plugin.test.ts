@@ -1,7 +1,8 @@
 import { test, expect } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, rmSync, existsSync, symlinkSync, readlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { createServer, type Socket } from "node:net";
 import herdrSubagents from "../extension.ts";
@@ -608,5 +609,101 @@ test("a session switch while the config is invalid keeps the last valid maxRows,
       else process.env[key] = value;
     }
     await herdr.close();
+  }
+});
+
+function pluginScriptFixture(dir: string, packageName: string) {
+  const packageRoot = join(dir, packageName);
+  const scripts = join(packageRoot, "scripts");
+  mkdirSync(scripts, { recursive: true });
+  const script = join(scripts, "plugin.sh");
+  writeFileSync(script, readFileSync(new URL("../scripts/plugin.sh", import.meta.url)));
+  writeFileSync(join(packageRoot, "extension.ts"), readFileSync(new URL("../extension.ts", import.meta.url)));
+  const herdr = join(dir, "herdr");
+  writeFileSync(herdr, `#!/bin/sh
+case "$*" in
+  --version) printf '%s\\n' 'herdr test' ;;
+  'pane report-metadata --help') printf '%s\\n' '--source --token --clear-token --ttl-ms' ;;
+  *) exit 1 ;;
+esac
+`);
+  chmodSync(herdr, 0o755);
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: dir,
+    PI_CONFIG_DIR: join(dir, "omp-config"),
+    HERDR_BIN_PATH: herdr,
+    OMP_PROFILE: "default",
+    PI_PROFILE: "default",
+  };
+  delete env.prod;
+  return { script, source: join(realpathSync(packageRoot), "extension.ts"), env };
+}
+
+test("doctor repair commands install the exact source with shell-special and multiline paths", () => {
+  const dir = mkdtempSync(join(tmpdir(), "herdr-repair-"));
+  try {
+    const metacharacters = "$prod ' \" `touch backtick-sentinel` $(touch dollar-sentinel)";
+    const { script, source, env } = pluginScriptFixture(dir, `pkg space ${metacharacters}\ninside`);
+    const marker = "Next: run this repair command:\n";
+    for (const state of ["missing", "dangling"] as const) {
+      const agentDir = join(dir, `agent space ${state} ${metacharacters}\ninside${state === "dangling" ? "\n" : ""}`);
+      const target = join(agentDir, "extensions", "herdr-omp-subagents.ts");
+      mkdirSync(join(agentDir, "extensions"), { recursive: true });
+      if (state === "dangling") symlinkSync(join(dir, "old-extension.ts"), target);
+
+      const doctor = spawnSync("sh", [script, "doctor", agentDir], { cwd: dir, env, encoding: "utf8" });
+      expect(doctor.error).toBeUndefined();
+      expect(doctor.status).toBe(1);
+      expect(doctor.stderr).toContain(marker);
+      const command = doctor.stderr.slice(doctor.stderr.lastIndexOf(marker) + marker.length);
+      expect(command.startsWith("sh '")).toBe(true);
+      expect(command.endsWith("\n")).toBe(true);
+      const install = spawnSync("sh", ["-c", command], { cwd: dir, env, encoding: "utf8" });
+      expect(install.error).toBeUndefined();
+      expect(install.status).toBe(0);
+      expect(readlinkSync(target)).toBe(source);
+      expect(realpathSync(target)).toBe(source);
+      expect(existsSync(join(agentDir.replace("$prod", ""), "extensions", "herdr-omp-subagents.ts"))).toBe(false);
+      expect(existsSync(join(dir, "backtick-sentinel"))).toBe(false);
+      expect(existsSync(join(dir, "dollar-sentinel"))).toBe(false);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("install and uninstall leave foreign live links and regular files unchanged", () => {
+  const dir = mkdtempSync(join(tmpdir(), "herdr-protection-"));
+  try {
+    const { script, env } = pluginScriptFixture(dir, "package");
+    const foreign = join(dir, "foreign.ts");
+    const foreignBytes = Buffer.from([0, 1, 2, 255]);
+    writeFileSync(foreign, foreignBytes);
+    const regularBytes = Buffer.from([255, 42, 0, 10]);
+    for (const kind of ["foreign", "regular"] as const) {
+      const agentDir = join(dir, kind);
+      mkdirSync(join(agentDir, "extensions"), { recursive: true });
+      const target = join(agentDir, "extensions", "herdr-omp-subagents.ts");
+      if (kind === "foreign") symlinkSync(foreign, target);
+      else writeFileSync(target, regularBytes);
+      const doctor = spawnSync("sh", [script, "doctor", agentDir], { cwd: dir, env, encoding: "utf8" });
+      expect(doctor.error).toBeUndefined();
+      expect(doctor.status).toBe(1);
+      expect(doctor.stderr).not.toContain("Next: run this repair command:");
+      for (const operation of ["install", "uninstall"] as const) {
+        const result = spawnSync("sh", [script, operation, agentDir], { cwd: dir, env, encoding: "utf8" });
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(1);
+        if (kind === "foreign") {
+          expect(readlinkSync(target)).toBe(foreign);
+          expect(readFileSync(foreign)).toEqual(foreignBytes);
+        } else {
+          expect(readFileSync(target)).toEqual(regularBytes);
+        }
+      }
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

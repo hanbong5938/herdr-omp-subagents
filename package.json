@@ -3,7 +3,7 @@
   "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Herdr native sidebar metadata for the main OMP model and live subagent models",
+  "description": "Show the current main OMP model and running subagent models in Herdr's agents sidebar",
   "scripts": {
     "test": "bun test",
     "doctor": "sh scripts/plugin.sh doctor"
